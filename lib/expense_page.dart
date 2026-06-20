@@ -1,336 +1,485 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'auth_page.dart';
+import 'category_icons.dart';
 
 class ExpensePage extends StatefulWidget {
-  const ExpensePage({super.key}); // key helps Flutter identify this widget
+  const ExpensePage({super.key});
   @override
   State<ExpensePage> createState() => _ExpensePageState();
 }
 
 class _ExpensePageState extends State<ExpensePage> {
 
-  // ─── Supabase Client ────────────────────────────────────────
-  // Supabase.instance.client gives us access to database and auth
+  // ─── Supabase ────────────────────────────────────────────────
   final supabase = Supabase.instance.client;
 
-  // ─── State Variables ────────────────────────────────────────
-  List<Map<String, dynamic>> _transactions = []; // all transactions from DB
-  double _totalIncome = 0;    // sum of all income
-  double _totalExpense = 0;   // sum of all expenses
-  bool _isLoading = false;    // controls loading spinner
+  // ─── State ───────────────────────────────────────────────────
+  List<Map<String, dynamic>> _transactions = [];
+  List<Map<String, dynamic>> _categories = [];
+  double _totalIncome = 0;
+  double _totalExpense = 0;
+  bool _isLoading = false;
+  String _userName = ''; // NEW — stores fetched profile name
 
-  // ─── Form Controllers ────────────────────────────────────────
-  // TextEditingController lets us read/clear text field values
+  // ─── Form ────────────────────────────────────────────────────
   final TextEditingController _amountController = TextEditingController();
   final TextEditingController _descriptionController = TextEditingController();
+  final TextEditingController _newCategoryController = TextEditingController();
 
-  // ─── Dropdown Default Values ─────────────────────────────────
-  String _selectedType = 'Expense';   // default transaction type
-  String _selectedCategory = 'Food'; // default category
+  String _selectedType = 'Expense';
+  String? _selectedCategory;
 
-  // All available categories shown in dropdown
-  final List<String> _categories = [
-    'Food',
-    'Transport',
-    'Shopping',
-    'Salary',
-    'Other',
-  ];
-
-  // ─── Lifecycle Method ────────────────────────────────────────
-  // initState() runs ONCE when this screen first opens
-  // Perfect place to load initial data from database
   @override
   void initState() {
     super.initState();
-    _fetchTransactions(); // load transactions when screen opens
+    _fetchTransactions();
+    _fetchCategories();
+    _fetchUserName(); // NEW
   }
 
-  // ─── FETCH Transactions (Read) ───────────────────────────────
-  // Gets all transactions from Supabase and updates the UI
+  // ─── FETCH Transactions ──────────────────────────────────────
+  // RLS policies automatically ensure only the logged-in user's
+  // rows are returned — no manual user_id filter needed here
   Future<void> _fetchTransactions() async {
-
-    // Show loading spinner while fetching
     setState(() => _isLoading = true);
-
     try {
-      // Query the transactions table
-      // .select() → get all columns
-      // .order() → sort by date, newest first
       final response = await supabase
           .from('transactions')
           .select()
           .order('date', ascending: false);
 
-      // 'mounted' check — makes sure screen is still open
-      // after the async await completes before updating UI
-      // Without this, if user navigates away during fetch,
-      // the app would crash trying to update a closed screen
+      if (!mounted) return;
+      setState(() {
+        _transactions = List<Map<String, dynamic>>.from(response);
+      });
+      _calculateTotals();
+    } catch (e) {
+      if (!mounted) return;
+      _showSnack('Error fetching data: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // ─── FETCH Categories ────────────────────────────────────────
+  Future<void> _fetchCategories() async {
+    try {
+      final response = await supabase
+          .from('categories')
+          .select()
+          .order('name', ascending: true);
+
       if (!mounted) return;
 
       setState(() {
-        // Convert response to a typed List of Maps
-        _transactions = List<Map<String, dynamic>>.from(response);
+        _categories = List<Map<String, dynamic>>.from(response);
+        if (_categories.isNotEmpty && _selectedCategory == null) {
+          _selectedCategory = _categories.first['name'];
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      _showSnack('Error loading categories: $e', isError: true);
+    }
+  }
+
+  // ─── FETCH User Profile Name (NEW) ───────────────────────────
+  // Fetches the name saved during onboarding to personalize the
+  // header greeting. Fails silently — name is nice-to-have, not critical
+  Future<void> _fetchUserName() async {
+    try {
+      final userId = supabase.auth.currentUser!.id;
+      final profile = await supabase
+          .from('profiles')
+          .select('name')
+          .eq('user_id', userId)
+          .maybeSingle();
+
+      if (!mounted) return;
+      setState(() {
+        _userName = profile?['name'] ?? '';
+      });
+    } catch (e) {
+      // Silently fail — don't bother user with an error for this
+    }
+  }
+
+  // ─── ADD New Category ────────────────────────────────────────
+  Future<void> _addCategory(String name) async {
+    if (name.trim().isEmpty) return;
+
+    try {
+      final userId = supabase.auth.currentUser!.id;
+
+      await supabase.from('categories').insert({
+        'user_id': userId,
+        'name': name.trim(),
       });
 
-      // Recalculate totals with fresh data
-      _calculateTotals();
+      if (!mounted) return;
+
+      await _fetchCategories();
+      setState(() => _selectedCategory = name.trim());
+      _newCategoryController.clear();
 
     } catch (e) {
-      // mounted check before using context after await
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error fetching data: $e')),
-      );
-    } finally {
-      // Always hide spinner whether success or error
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      _showSnack('Error adding category: $e', isError: true);
     }
   }
 
   // ─── CALCULATE Totals ────────────────────────────────────────
-  // Loops through all transactions and calculates income/expense sums
   void _calculateTotals() {
     double income = 0;
     double expense = 0;
-
-    for (var transaction in _transactions) {
-      // Check type field of each transaction
-      if (transaction['type'] == 'Income') {
-        // 'as num' safely converts dynamic type to number
-        // .toDouble() ensures we always work with decimal numbers
-        income += (transaction['amount'] as num).toDouble();
+    for (var t in _transactions) {
+      if (t['type'] == 'Income') {
+        income += (t['amount'] as num).toDouble();
       } else {
-        expense += (transaction['amount'] as num).toDouble();
+        expense += (t['amount'] as num).toDouble();
       }
     }
-
-    // Update UI with new calculated values
     setState(() {
       _totalIncome = income;
       _totalExpense = expense;
     });
   }
 
-  // ─── ADD Transaction (Create) ────────────────────────────────
-  // Inserts a new transaction into Supabase database
+  // ─── ADD Transaction ─────────────────────────────────────────
   Future<void> _addTransaction() async {
-
-    // Validate — do not proceed if amount is empty
     if (_amountController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Please enter an amount')),
-      );
-      return; // stop function here
+      _showSnack('Please enter an amount', isError: true);
+      return;
     }
-
+    if (_selectedCategory == null) {
+      _showSnack('Please select a category', isError: true);
+      return;
+    }
     try {
-      // Get logged-in user's unique ID from Supabase Auth
-      // Every authenticated user has a unique UUID
       final userId = supabase.auth.currentUser!.id;
-
-      // Insert new row into transactions table
-      // Each key matches a column name in our Supabase table
       await supabase.from('transactions').insert({
         'user_id': userId,
         'type': _selectedType,
         'category': _selectedCategory,
         'amount': double.parse(_amountController.text.trim()),
         'description': _descriptionController.text.trim(),
-        'date': DateTime.now().toIso8601String(), // current timestamp
+        'date': DateTime.now().toIso8601String(),
       });
 
-      // mounted check before using context after await
       if (!mounted) return;
-
-      // Clear form fields after successful insert
       _amountController.clear();
       _descriptionController.clear();
-
-      // Close the bottom sheet form
       Navigator.pop(context);
-
-      // Refresh transaction list to show new entry
       _fetchTransactions();
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transaction added successfully!')),
-      );
-
+      _showSnack('Transaction added!');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error adding transaction: $e')),
-      );
+      _showSnack('Error: $e', isError: true);
     }
   }
 
   // ─── DELETE Transaction ──────────────────────────────────────
-  // Removes a transaction from database using its unique ID
   Future<void> _deleteTransaction(String id) async {
     try {
-      // .delete() removes the row
-      // .eq('id', id) means: only delete where id matches
-      // This ensures we delete only the intended row
-      await supabase
-          .from('transactions')
-          .delete()
-          .eq('id', id);
-
-      // mounted check before using context after await
+      await supabase.from('transactions').delete().eq('id', id);
       if (!mounted) return;
-
-      // Refresh list after deletion
       _fetchTransactions();
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transaction deleted')),
-      );
-
+      _showSnack('Transaction deleted');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error deleting: $e')),
-      );
+      _showSnack('Error: $e', isError: true);
     }
   }
 
   // ─── LOGOUT ──────────────────────────────────────────────────
-  // Signs out current user from Supabase and returns to AuthPage
   Future<void> _logout() async {
-    // signOut() clears the user session from Supabase
     await supabase.auth.signOut();
-
-    // mounted check before using context after await
     if (!mounted) return;
-
-    // pushReplacement removes ExpensePage from navigation stack
-    // so user cannot go back to it after logout
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (context) => const AuthPage()),
     );
   }
 
-  // ─── SHOW Add Transaction Form ───────────────────────────────
-  // Opens a slide-up bottom sheet containing the add form
+  // ─── SNACKBAR Helper ─────────────────────────────────────────
+  void _showSnack(String message, {bool isError = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Colors.red[700] : Colors.green[700],
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        margin: const EdgeInsets.all(12),
+      ),
+    );
+  }
+
+  // ─── SHOW Add Category Dialog ─────────────────────────────────
+  void _showAddCategoryDialog() {
+    final colors = Theme.of(context).colorScheme;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1E1E2E),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text(
+            'New Category',
+            style: TextStyle(color: colors.onSurface, fontWeight: FontWeight.bold),
+          ),
+          content: TextField(
+            controller: _newCategoryController,
+            autofocus: true,
+            style: TextStyle(color: colors.onSurface),
+            decoration: InputDecoration(
+              hintText: 'e.g. Vegetables, Gym, Rent',
+              hintStyle: TextStyle(color: colors.onSurface.withValues(alpha: 0.3)),
+              filled: true,
+              fillColor: colors.surface,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                _newCategoryController.clear();
+                Navigator.pop(dialogContext);
+              },
+              child: Text('Cancel', style: TextStyle(color: colors.onSurface.withValues(alpha: 0.5))),
+            ),
+            FilledButton(
+              onPressed: () {
+                _addCategory(_newCategoryController.text);
+                Navigator.pop(dialogContext);
+              },
+              child: const Text('Add'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ─── SHOW Add Transaction Sheet ──────────────────────────────
   void _showAddTransactionSheet() {
+    final colors = Theme.of(context).colorScheme;
+
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true, // allows sheet to resize with keyboard
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E2E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (context) {
-        return Padding(
-          // viewInsets.bottom = keyboard height
-          // This pushes the form above the keyboard automatically
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom,
-            left: 20,
-            right: 20,
-            top: 20,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min, // wrap content, don't fill screen
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-
-              Text(
-                'Add Transaction',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom,
+                left: 20,
+                right: 20,
+                top: 20,
               ),
-              SizedBox(height: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
 
-              // ── Type Dropdown ─────────────────────────────────
-              DropdownButtonFormField<String>(
-                initialValue: _selectedType,
-                decoration: InputDecoration(
-                  labelText: 'Type',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                // Map each string to a DropdownMenuItem widget
-                items: ['Income', 'Expense'].map((type) {
-                  return DropdownMenuItem(value: type, child: Text(type));
-                }).toList(),
-                onChanged: (value) {
-                  setState(() => _selectedType = value!);
-                },
-              ),
-              SizedBox(height: 12),
-
-              // ── Category Dropdown ─────────────────────────────
-              DropdownButtonFormField<String>(
-                initialValue: _selectedCategory,
-                decoration: InputDecoration(
-                  labelText: 'Category',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                items: _categories.map((cat) {
-                  return DropdownMenuItem(value: cat, child: Text(cat));
-                }).toList(),
-                onChanged: (value) {
-                  setState(() => _selectedCategory = value!);
-                },
-              ),
-              SizedBox(height: 12),
-
-              // ── Amount Field ──────────────────────────────────
-              TextField(
-                controller: _amountController,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: 'Amount (PKR)',
-                  prefixIcon: Icon(Icons.attach_money),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-              SizedBox(height: 12),
-
-              // ── Description Field ─────────────────────────────
-              TextField(
-                controller: _descriptionController,
-                decoration: InputDecoration(
-                  labelText: 'Description (optional)',
-                  prefixIcon: Icon(Icons.note),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-              SizedBox(height: 20),
-
-              // ── Submit Button ─────────────────────────────────
-              SizedBox(
-                width: double.infinity, // full width button
-                child: ElevatedButton(
-                  onPressed: _addTransaction,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: colors.onSurface.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
                   ),
-                  child: Text(
-                    'Add Transaction',
-                    style: TextStyle(fontSize: 16),
+                  const SizedBox(height: 20),
+
+                  Text(
+                    'New Transaction',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: colors.onSurface,
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 20),
+
+                  // ── Type Toggle ───────────────────────────
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'Income',
+                        label: Text('Income'),
+                        icon: Icon(Icons.arrow_downward_rounded),
+                      ),
+                      ButtonSegment(
+                        value: 'Expense',
+                        label: Text('Expense'),
+                        icon: Icon(Icons.arrow_upward_rounded),
+                      ),
+                    ],
+                    selected: {_selectedType},
+                    onSelectionChanged: (value) {
+                      setState(() => _selectedType = value.first);
+                      setSheetState(() {});
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Category Row: Dropdown + Add Button ──────
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _categories.isEmpty
+                            ? Container(
+                                padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+                                decoration: BoxDecoration(
+                                  color: colors.surface,
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Text(
+                                  'No categories yet — tap + to add one',
+                                  style: TextStyle(color: colors.onSurface.withValues(alpha: 0.4), fontSize: 13),
+                                ),
+                              )
+                            : DropdownButtonFormField<String>(
+                                initialValue: _selectedCategory,
+                                decoration: InputDecoration(
+                                  labelText: 'Category',
+                                  prefixIcon: Icon(
+                                    _selectedCategory != null
+                                        ? CategoryIconHelper.getIcon(_selectedCategory!)
+                                        : Icons.category_rounded,
+                                    color: _selectedCategory != null
+                                        ? CategoryIconHelper.getColor(_selectedCategory!)
+                                        : colors.primary,
+                                  ),
+                                  filled: true,
+                                  fillColor: colors.surface,
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                    borderSide: BorderSide.none,
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                    borderSide: BorderSide(color: colors.primary, width: 1.5),
+                                  ),
+                                ),
+                                items: _categories.map((cat) {
+                                  final name = cat['name'] as String;
+                                  return DropdownMenuItem(
+                                    value: name,
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          CategoryIconHelper.getIcon(name),
+                                          color: CategoryIconHelper.getColor(name),
+                                          size: 18,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(name),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                                onChanged: (value) {
+                                  setState(() => _selectedCategory = value);
+                                  setSheetState(() {});
+                                },
+                              ),
+                      ),
+                      const SizedBox(width: 10),
+
+                      Container(
+                        decoration: BoxDecoration(
+                          color: colors.primary.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: IconButton(
+                          onPressed: () {
+                            _showAddCategoryDialog();
+                          },
+                          icon: Icon(Icons.add_rounded, color: colors.primary),
+                          tooltip: 'Add new category',
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Amount Field ──────────────────────────
+                  TextField(
+                    controller: _amountController,
+                    keyboardType: TextInputType.number,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    decoration: InputDecoration(
+                      labelText: 'Amount',
+                      prefixText: 'PKR  ',
+                      prefixStyle: TextStyle(color: colors.primary, fontWeight: FontWeight.w600),
+                      filled: true,
+                      fillColor: colors.surface,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide.none,
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: colors.primary, width: 1.5),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Description Field ─────────────────────
+                  TextField(
+                    controller: _descriptionController,
+                    decoration: InputDecoration(
+                      labelText: 'Note (optional)',
+                      prefixIcon: const Icon(Icons.edit_note_rounded),
+                      filled: true,
+                      fillColor: colors.surface,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide.none,
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: colors.primary, width: 1.5),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // ── Submit Button ─────────────────────────
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: FilledButton.icon(
+                      onPressed: _addTransaction,
+                      icon: const Icon(Icons.add_rounded),
+                      label: const Text(
+                        'Add Transaction',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      ),
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                ],
               ),
-              SizedBox(height: 20),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -339,222 +488,283 @@ class _ExpensePageState extends State<ExpensePage> {
   // ─── MAIN UI ─────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-
-    // Calculate balance on every rebuild
+    final colors = Theme.of(context).colorScheme;
     double balance = _totalIncome - _totalExpense;
 
-    return Scaffold(
-      backgroundColor: Colors.grey[100],
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isSmallScreen = screenWidth < 360;
 
-      // ── AppBar ───────────────────────────────────────────────
+    return Scaffold(
       appBar: AppBar(
-        title: Text('Smart Expense Tracker'),
-        backgroundColor: Colors.green,
-        foregroundColor: Colors.white,
+        // Shows "Hi, Name 👋" if name is loaded, otherwise falls
+        // back to the generic app title
+        title: Text(
+          _userName.isNotEmpty ? 'Hi, $_userName 👋' : 'Expense Tracker',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
         actions: [
-          // Logout icon button at top right
-          IconButton(
-            icon: Icon(Icons.logout),
-            onPressed: _logout,
-            tooltip: 'Logout',
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: IconButton(
+              onPressed: _logout,
+              icon: CircleAvatar(
+                radius: 16,
+                backgroundColor: colors.primary.withValues(alpha: 0.2),
+                child: Icon(Icons.person_rounded, size: 18, color: colors.primary),
+              ),
+              tooltip: 'Logout',
+            ),
           ),
         ],
       ),
 
-      // ── Body ─────────────────────────────────────────────────
-      // Show spinner while loading, otherwise show content
       body: _isLoading
-          ? Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
+          ? Center(child: CircularProgressIndicator(color: colors.primary))
+          : RefreshIndicator(
+              onRefresh: () async {
+                await _fetchTransactions();
+                await _fetchCategories();
+                await _fetchUserName();
+              },
+              color: colors.primary,
+              child: CustomScrollView(
+                slivers: [
 
-                // ── Summary Card ───────────────────────────────
-                Container(
-                  width: double.infinity,
-                  margin: EdgeInsets.all(16),
-                  padding: EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.green,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Column(
-                    children: [
-
-                      Text(
-                        'Remaining Balance',
-                        style: TextStyle(color: Colors.white70, fontSize: 14),
-                      ),
-                      SizedBox(height: 8),
-
-                      // Large balance amount
-                      Text(
-                        'PKR ${balance.toStringAsFixed(2)}',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 32,
-                          fontWeight: FontWeight.bold,
+                  // ── Summary Card ─────────────────────────
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [colors.primary, colors.primary.withValues(alpha: 0.7)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(24),
                         ),
-                      ),
-                      SizedBox(height: 20),
+                        padding: EdgeInsets.all(isSmallScreen ? 18 : 24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
 
-                      // Income and Expense side by side
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceAround,
-                        children: [
-
-                          // ── Income Summary ────────────────────
-                          Column(
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(Icons.arrow_downward,
-                                      color: Colors.greenAccent, size: 16),
-                                  SizedBox(width: 4),
-                                  Text('Income',
-                                      style: TextStyle(color: Colors.white70)),
-                                ],
+                            Text(
+                              'Total Balance',
+                              style: TextStyle(
+                                color: colors.onPrimary.withValues(alpha: 0.7),
+                                fontSize: 14,
+                                letterSpacing: 0.5,
                               ),
-                              Text(
-                                'PKR ${_totalIncome.toStringAsFixed(2)}',
+                            ),
+                            const SizedBox(height: 8),
+
+                            FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                'PKR ${balance.toStringAsFixed(0)}',
                                 style: TextStyle(
-                                  color: Colors.white,
+                                  color: colors.onPrimary,
+                                  fontSize: isSmallScreen ? 28 : 36,
                                   fontWeight: FontWeight.bold,
+                                  letterSpacing: -1,
                                 ),
                               ),
-                            ],
-                          ),
+                            ),
+                            const SizedBox(height: 24),
 
-                          // ── Expense Summary ───────────────────
-                          Column(
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(Icons.arrow_upward,
-                                      color: Colors.redAccent, size: 16),
-                                  SizedBox(width: 4),
-                                  Text('Expense',
-                                      style: TextStyle(color: Colors.white70)),
-                                ],
-                              ),
-                              Text(
-                                'PKR ${_totalExpense.toStringAsFixed(2)}',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
+                            Divider(color: colors.onPrimary.withValues(alpha: 0.2)),
+                            const SizedBox(height: 16),
+
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white.withValues(alpha: 0.2),
+                                          borderRadius: BorderRadius.circular(10),
+                                        ),
+                                        child: const Icon(Icons.arrow_downward_rounded, color: Colors.white, size: 16),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text('Income',
+                                                style: TextStyle(color: colors.onPrimary.withValues(alpha: 0.7), fontSize: 12)),
+                                            FittedBox(
+                                              fit: BoxFit.scaleDown,
+                                              alignment: Alignment.centerLeft,
+                                              child: Text(
+                                                'PKR ${_totalIncome.toStringAsFixed(0)}',
+                                                style: TextStyle(color: colors.onPrimary, fontWeight: FontWeight.bold, fontSize: 15),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-
-                // ── Section Header ─────────────────────────────
-                Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'Transactions',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+                                Container(width: 1, height: 40, color: colors.onPrimary.withValues(alpha: 0.2)),
+                                Expanded(
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(left: 16),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white.withValues(alpha: 0.2),
+                                            borderRadius: BorderRadius.circular(10),
+                                          ),
+                                          child: const Icon(Icons.arrow_upward_rounded, color: Colors.white, size: 16),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text('Expense',
+                                                  style: TextStyle(color: colors.onPrimary.withValues(alpha: 0.7), fontSize: 12)),
+                                              FittedBox(
+                                                fit: BoxFit.scaleDown,
+                                                alignment: Alignment.centerLeft,
+                                                child: Text(
+                                                  'PKR ${_totalExpense.toStringAsFixed(0)}',
+                                                  style: TextStyle(color: colors.onPrimary, fontWeight: FontWeight.bold, fontSize: 15),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                SizedBox(height: 8),
 
-                // ── Transaction List ───────────────────────────
-                // Expanded fills remaining screen space with list
-                Expanded(
-                  child: _transactions.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No transactions yet.\nTap + to add one.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey),
+                  // ── Transactions Header ───────────────────
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Transactions',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: colors.onSurface),
                           ),
-                        )
-                      : ListView.builder(
-                          padding: EdgeInsets.symmetric(horizontal: 16),
-                          itemCount: _transactions.length,
-                          // itemBuilder builds each card one by one
-                          // index = position in list (0, 1, 2...)
-                          itemBuilder: (context, index) {
-                            final t = _transactions[index];
-                            final isIncome = t['type'] == 'Income';
+                          Text(
+                            '${_transactions.length} total',
+                            style: TextStyle(fontSize: 13, color: colors.onSurface.withValues(alpha: 0.4)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
 
-                            return Card(
-                              margin: EdgeInsets.only(bottom: 10),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
+                  // ── Empty State ───────────────────────────
+                  if (_transactions.isEmpty)
+                    SliverFillRemaining(
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.receipt_long_rounded, size: 64, color: colors.onSurface.withValues(alpha: 0.2)),
+                            const SizedBox(height: 16),
+                            Text('No transactions yet',
+                                style: TextStyle(fontSize: 16, color: colors.onSurface.withValues(alpha: 0.4), fontWeight: FontWeight.w500)),
+                            const SizedBox(height: 8),
+                            Text('Tap + to add your first one',
+                                style: TextStyle(fontSize: 13, color: colors.onSurface.withValues(alpha: 0.3))),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                  // ── Transaction List ──────────────────────
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    sliver: SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) {
+                          final t = _transactions[index];
+                          final isIncome = t['type'] == 'Income';
+                          final category = t['category'] ?? 'Other';
+
+                          final icon = CategoryIconHelper.getIcon(category);
+                          final color = CategoryIconHelper.getColor(category);
+
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1E1E2E),
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              leading: Container(
+                                width: 46,
+                                height: 46,
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Icon(icon, color: color, size: 22),
                               ),
-                              child: ListTile(
-                                // Colored circle icon on the left
-                                leading: CircleAvatar(
-                                  backgroundColor: isIncome
-                                      ? Colors.green[100]
-                                      : Colors.red[100],
-                                  child: Icon(
-                                    isIncome
-                                        ? Icons.arrow_downward
-                                        : Icons.arrow_upward,
-                                    color: isIncome
-                                        ? Colors.green
-                                        : Colors.red,
-                                  ),
-                                ),
-
-                                // Category name as main title
-                                title: Text(
-                                  t['category'] ?? 'Unknown',
-                                  style: TextStyle(fontWeight: FontWeight.bold),
-                                ),
-
-                                // Description below title
-                                subtitle: Text(t['description'] ?? ''),
-
-                                // Amount + delete button on the right
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      '${isIncome ? '+' : '-'} PKR ${(t['amount'] as num).toStringAsFixed(2)}',
+                              title: Text(category, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                              subtitle: Text(
+                                t['description'] ?? '',
+                                style: TextStyle(fontSize: 12, color: colors.onSurface.withValues(alpha: 0.4)),
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      '${isIncome ? '+' : '-'} ${(t['amount'] as num).toStringAsFixed(0)}',
+                                      overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        color: isIncome
-                                            ? Colors.green
-                                            : Colors.red,
+                                        color: isIncome ? Colors.green : Colors.red,
                                         fontWeight: FontWeight.bold,
+                                        fontSize: 15,
                                       ),
                                     ),
-                                    // Delete button
-                                    IconButton(
-                                      icon: Icon(Icons.delete,
-                                          color: Colors.grey),
-                                      // Pass transaction id to delete function
-                                      onPressed: () =>
-                                          _deleteTransaction(t['id']),
-                                    ),
-                                  ],
-                                ),
+                                  ),
+                                  IconButton(
+                                    icon: Icon(Icons.delete_outline_rounded, color: colors.onSurface.withValues(alpha: 0.3), size: 20),
+                                    onPressed: () => _deleteTransaction(t['id']),
+                                  ),
+                                ],
                               ),
-                            );
-                          },
-                        ),
-                ),
-              ],
+                            ),
+                          );
+                        },
+                        childCount: _transactions.length,
+                      ),
+                    ),
+                  ),
+
+                  const SliverToBoxAdapter(child: SizedBox(height: 80)),
+                ],
+              ),
             ),
 
-      // ── Floating Action Button ─────────────────────────────
-      // Green + button at bottom right to open add form
-      floatingActionButton: FloatingActionButton(
+      floatingActionButton: FloatingActionButton.extended(
         onPressed: _showAddTransactionSheet,
-        backgroundColor: Colors.green,
-        child: Icon(Icons.add, color: Colors.white),
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Add', style: TextStyle(fontWeight: FontWeight.w600)),
       ),
     );
   }

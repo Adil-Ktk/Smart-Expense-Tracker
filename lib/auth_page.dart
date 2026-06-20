@@ -1,115 +1,83 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'expense_page.dart';
+import 'onboarding_page.dart'; // NEW import
 
-// This page handles both Login and Signup in one screen
 class AuthPage extends StatefulWidget {
-  const AuthPage({super.key}); // key helps Flutter identify this widget
+  const AuthPage({super.key});
   @override
   State<AuthPage> createState() => _AuthPageState();
 }
 
 class _AuthPageState extends State<AuthPage> {
 
-  // ─── Controllers ────────────────────────────────────────────
-  // TextEditingController connects to a TextField and lets us
-  // read whatever the user typed, or clear the field programmatically
+  // ─── Controllers ─────────────────────────────────────────────
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
 
-  // ─── State Variables ─────────────────────────────────────────
-  bool _isLogin = true;       // true = Login mode, false = Signup mode
-  bool _isLoading = false;    // true = show spinner, false = show button
-  String _errorMessage = '';  // empty means no error to display
+  // ─── State ───────────────────────────────────────────────────
+  bool _isLogin = true;
+  bool _isLoading = false;
+  bool _obscurePassword = true;
+  String _errorMessage = '';
 
-  // ─── Supabase Client ─────────────────────────────────────────
-  // Supabase.instance.client is the single entry point to:
-  // - auth (login, signup, logout)
-  // - database (insert, select, delete)
   final supabase = Supabase.instance.client;
 
   // ─── AUTHENTICATE ────────────────────────────────────────────
-  // This function handles both Login and Signup logic
-  // It runs when user taps the Login or Sign Up button
   Future<void> _authenticate() async {
-
-    // Read and clean user input from text fields
-    // .trim() removes any accidental spaces at start or end
     final email = _emailController.text.trim();
     final password = _passwordController.text.trim();
 
-    // Basic validation — stop if fields are empty
     if (email.isEmpty || password.isEmpty) {
-      setState(() {
-        _errorMessage = 'Please enter email and password.';
-      });
-      return; // exit function early, don't call Supabase
+      setState(() => _errorMessage = 'Please enter email and password.');
+      return;
     }
 
-    // Show loading spinner and clear any previous error message
     setState(() {
       _isLoading = true;
       _errorMessage = '';
     });
 
     try {
-
       if (_isLogin) {
         // ── LOGIN ──────────────────────────────────────────────
-        // signInWithPassword() sends credentials to Supabase Auth
-        // Supabase checks if the user exists and password is correct
-        // If wrong → throws an exception which we catch below
         await supabase.auth.signInWithPassword(
           email: email,
           password: password,
         );
+
+        if (!mounted) return;
+
+        // Existing user already completed onboarding before
+        // So go straight to the main app
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const ExpensePage()),
+        );
+
       } else {
         // ── SIGNUP ─────────────────────────────────────────────
-        // signUp() creates a brand new user account in Supabase Auth
-        // Supabase stores the email and hashed password securely
-        // No need to create a users table — Supabase handles this
         await supabase.auth.signUp(
           email: email,
           password: password,
         );
+
+        if (!mounted) return;
+
+        // Brand new user — must complete onboarding first
+        // (income, gender, marital status) before reaching the app
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const OnboardingPage()),
+        );
       }
 
-      // ── After successful auth ──────────────────────────────
-      // 'mounted' tells us if this widget is still in the widget tree
-      // If user navigates away during the async call above,
-      // 'mounted' will be false and we should NOT use 'context'
-      // because the screen no longer exists in memory
-      if (!mounted) return;
-
-      // pushReplacement navigates to ExpensePage AND removes
-      // AuthPage from the navigation stack so user cannot
-      // go back to login screen by pressing back button
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const ExpensePage()),
-      );
-
     } catch (e) {
-      // Supabase throws exceptions for wrong password, invalid email etc.
-      // We catch them here and display the message to the user
-
-      // mounted check before setState — screen must still be open
       if (!mounted) return;
-
-      setState(() {
-        _errorMessage = e.toString(); // show error below the button
-      });
-
+      setState(() => _errorMessage = e.toString());
     } finally {
-      // finally block ALWAYS runs — whether try succeeded or catch ran
-      // Perfect place to hide the loading spinner in all cases
-      // We use if(mounted) instead of return inside finally
-      // because 'return' inside finally is considered bad practice —
-      // it can silently swallow exceptions and confuse control flow
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
+        setState(() => _isLoading = false);
       }
     }
   }
@@ -117,139 +85,208 @@ class _AuthPageState extends State<AuthPage> {
   // ─── UI ──────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
 
-      body: Center(
-        // SingleChildScrollView prevents overflow when keyboard appears
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-
-              // ── App Icon ──────────────────────────────────────
-              Icon(
-                Icons.account_balance_wallet,
-                size: 80,
-                color: Colors.green,
-              ),
-              SizedBox(height: 16),
-
-              // ── Title ─────────────────────────────────────────
-              // Changes text based on current mode (login or signup)
-              Text(
-                _isLogin ? 'Welcome Back' : 'Create Account',
-                style: TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              SizedBox(height: 32),
-
-              // ── Email Field ───────────────────────────────────
-              // controller links this field to _emailController
-              // so we can read its value later in _authenticate()
-              TextField(
-                controller: _emailController,
-                keyboardType: TextInputType.emailAddress,
-                decoration: InputDecoration(
-                  labelText: 'Email',
-                  prefixIcon: Icon(Icons.email),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  filled: true,
-                  fillColor: Colors.white,
-                ),
-              ),
-              SizedBox(height: 16),
-
-              // ── Password Field ────────────────────────────────
-              // obscureText: true hides characters as user types
-              // This is standard behavior for password fields
-              TextField(
-                controller: _passwordController,
-                obscureText: true,
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  prefixIcon: Icon(Icons.lock),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  filled: true,
-                  fillColor: Colors.white,
-                ),
-              ),
-              SizedBox(height: 16),
-
-              // ── Error Message ─────────────────────────────────
-              // This widget only appears when _errorMessage is not empty
-              // 'if' inside a Column acts like a conditional widget
-              if (_errorMessage.isNotEmpty)
-                Container(
-                  width: double.infinity,
-                  padding: EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.red[50],
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.red.shade200),
-                  ),
-                  child: Text(
-                    _errorMessage,
-                    style: TextStyle(color: Colors.red),
-                  ),
-                ),
-              SizedBox(height: 16),
-
-              // ── Login / Signup Button ─────────────────────────
-              SizedBox(
-                width: double.infinity, // stretch button to full width
-                child: ElevatedButton(
-                  // When _isLoading is true, onPressed is set to null
-                  // A null onPressed automatically disables the button
-                  // This prevents user from tapping multiple times
-                  onPressed: _isLoading ? null : _authenticate,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                Center(
+                  child: Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: colors.primary.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Icon(
+                      Icons.account_balance_wallet_rounded,
+                      size: 40,
+                      color: colors.primary,
                     ),
                   ),
-                  // Show spinner when loading, show text when idle
-                  child: _isLoading
-                      ? CircularProgressIndicator(color: Colors.white)
-                      : Text(
-                          _isLogin ? 'Login' : 'Sign Up',
-                          style: TextStyle(fontSize: 16),
-                        ),
                 ),
-              ),
-              SizedBox(height: 16),
+                const SizedBox(height: 32),
 
-              // ── Toggle Between Login and Signup ───────────────
-              // TextButton is a flat button with no background
-              // Tapping it flips _isLogin between true and false
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _isLogin = !_isLogin; // flip mode
-                    _errorMessage = '';   // clear errors on mode switch
-                  });
-                },
-                child: Text(
-                  // Ternary operator: condition ? ifTrue : ifFalse
+                Text(
+                  _isLogin ? 'Welcome\nBack 👋' : 'Create\nAccount ✨',
+                  style: TextStyle(
+                    fontSize: 36,
+                    fontWeight: FontWeight.bold,
+                    color: colors.onSurface,
+                    height: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 8),
+
+                Text(
                   _isLogin
-                      ? "Don't have an account? Sign Up"
-                      : 'Already have an account? Login',
-                  style: TextStyle(color: Colors.green),
+                      ? 'Sign in to manage your finances'
+                      : 'Start tracking your expenses today',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: colors.onSurface.withValues(alpha: 0.7),
+                  ),
                 ),
-              ),
+                const SizedBox(height: 40),
 
-            ],
+                Text(
+                  'Email',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: colors.onSurface.withValues(alpha: 0.7),
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  style: const TextStyle(fontSize: 15),
+                  decoration: InputDecoration(
+                    hintText: 'you@example.com',
+                    hintStyle: TextStyle(color: colors.onSurface.withValues(alpha: 0.3)),
+                    prefixIcon: Icon(Icons.email_outlined, color: colors.primary, size: 20),
+                    filled: true,
+                    fillColor: colors.surface,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(color: colors.primary, width: 1.5),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                Text(
+                  'Password',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: colors.onSurface.withValues(alpha: 0.7),
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: _obscurePassword,
+                  style: const TextStyle(fontSize: 15),
+                  decoration: InputDecoration(
+                    hintText: '••••••••',
+                    hintStyle: TextStyle(color: colors.onSurface.withValues(alpha: 0.3)),
+                    prefixIcon: Icon(Icons.lock_outline_rounded, color: colors.primary, size: 20),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                        color: colors.onSurface.withValues(alpha: 0.4),
+                        size: 20,
+                      ),
+                      onPressed: () {
+                        setState(() => _obscurePassword = !_obscurePassword);
+                      },
+                    ),
+                    filled: true,
+                    fillColor: colors.surface,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide(color: colors.primary, width: 1.5),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                if (_errorMessage.isNotEmpty)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: colors.error.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: colors.error.withValues(alpha: 0.3), width: 1),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.error_outline, color: colors.error, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _errorMessage,
+                            style: TextStyle(color: colors.error, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 28),
+
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: FilledButton(
+                    onPressed: _isLoading ? null : _authenticate,
+                    style: FilledButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    child: _isLoading
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Text(
+                            _isLogin ? 'Sign In' : 'Create Account',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                Center(
+                  child: TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _isLogin = !_isLogin;
+                        _errorMessage = '';
+                      });
+                    },
+                    child: RichText(
+                      text: TextSpan(
+                        text: _isLogin ? "Don't have an account? " : 'Already have an account? ',
+                        style: TextStyle(color: colors.onSurface.withValues(alpha: 0.5), fontSize: 14),
+                        children: [
+                          TextSpan(
+                            text: _isLogin ? 'Sign Up' : 'Sign In',
+                            style: TextStyle(color: colors.primary, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
